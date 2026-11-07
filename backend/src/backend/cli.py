@@ -10,16 +10,30 @@ from datetime import date
 import httpx
 
 from backend.config import Settings
+from backend.research_schemas import ResearchRequest, ResearchResult
 from backend.schemas import SearchResult
+from backend.services.research import research
 from backend.tools.cve import CveDetails, get_cve_details
 from backend.tools.http import ToolError
 from backend.tools.search import search_news
 
 
-async def run(args: argparse.Namespace) -> SearchResult | CveDetails:
+async def run(args: argparse.Namespace) -> SearchResult | CveDetails | ResearchResult:
     """設定を読み、指定された取得処理を実行する。"""
     settings = Settings()
     async with httpx.AsyncClient() as client:
+        if args.command == "research":
+            return await research(
+                ResearchRequest(
+                    query=args.query,
+                    start_date=args.start,
+                    end_date=args.end,
+                    limit=args.limit,
+                    timezone=settings.search_timezone,
+                ),
+                settings=settings,
+                client=client,
+            )
         if args.command == "cve":
             return await get_cve_details(
                 args.cve_id,
@@ -58,6 +72,11 @@ def main() -> int:
         nargs="+",
         choices=["rss", "hatena", "zenn", "qiita", "nvd", "openai"],
     )
+    investigation = commands.add_parser("research")
+    investigation.add_argument("query")
+    investigation.add_argument("--start", type=date.fromisoformat, required=True)
+    investigation.add_argument("--end", type=date.fromisoformat, required=True)
+    investigation.add_argument("--limit", type=int, default=5)
     args = parser.parse_args()
     # 使用量のみ標準エラーへ出し、結果JSONと通信ログを混ぜない。
     usage_logger = logging.getLogger("backend.search_usage")

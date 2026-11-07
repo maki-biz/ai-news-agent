@@ -12,7 +12,7 @@ uv run uvicorn backend.main:app --reload --env-file .env
 
 `.env`は作業ディレクトリから読み込みます。既存の`.env`を設定例で上書きする必要はありません。
 `GET /api/health`は外部サービスに依存せず`{"status":"ok"}`を返します。
-検索・保存HTTP API、DB保存、要約・分類・重要度評価のLLM層は後続工程です。
+検索・保存HTTP API、DB保存、分類・重要度評価は後続工程です。調査CLIは下記を参照してください。
 
 ## ニュース・CVE取得
 
@@ -145,3 +145,73 @@ uv run ruff format --check .
 APIキーなし・APIは1ページ・候補上限10件で疎通確認し、統合結果の記事5件・CVE5件を取得しました。
 上限による部分取得は状態・警告に記録されています。有料APIは呼び出していません。
 取得した外部本文・応答全文は保存していません。
+
+
+## Step 3：単一調査エージェント
+
+`research`はOpenAI Agents SDKで依頼を解釈し、ニュース検索・NVD期間検索・CVE ID照会の
+3つのFunction Toolを選びます。既存の取得・期間判定・重複整理を再利用しています。
+サーバー側の`OPENAI_API_KEY`が必要です。依存追加はありません。
+
+```bash
+# backend/で実行。結果は標準出力、使用量は標準エラー。
+uv run python -m backend.cli research "AIエージェントの技術動向と関連する脆弱性" \
+  --start 2026-11-01 --end 2026-11-07 --limit 5
+```
+
+`research`の実行は有料LLMを呼び出します。既存の`search`・`cve`の挙動は維持しています。
+`PAID_SEARCH_ENABLED`とは別であり、調査Agentには有料Web Searchを公開しません。
+ニュース取得は`NEWS_SOURCES`のうちNVD以外、CVE検索はNVDを使用します。
+フィードが提供しない過去記事や、設定ソースに存在しない記事は取得できません。
+
+出力は`query`、`articles`、`vulnerabilities`、`warnings`、`source_statuses`です。
+記事は最大5件（`--limit`は1〜5）、CVEは別枠で最大5件です。
+記事には`title`、`url`、`published_at`、`source`、`summary`、`verification_status`、
+`summary_basis`、既存の取得経路等を含めます。CVEはNVD詳細ページを出典として返します。
+日付範囲は両端を含み、`SEARCH_TIMEZONE`で判定します。調査CLIでは公開日不明を除外します。
+CVE ID照会も指定公開期間に入るものだけを結果候補にします。
+
+LLMは候補IDと最大600文字の**抽出要約**を選択します。抜粋・NVD説明内の連続した原文と
+一致することをコードで検査し、タイトル・URL・日付は取得済み値から復元します。
+翻訳・言い換えは行いません。抜粋がなければ`summary: null`、`summary_basis: "unavailable"`。
+抽出できた場合は記事が`excerpt`、CVEが`description`です。
+取得情報自体の真偽や抜粋による文脈の欠落までは独立検証できないため、すべて`unverified`です。
+記事リンク先の本文取得、DB、RAG、Web UI、複数Agentは追加していません。
+
+| 調査設定 | 既定値（最大値） |
+| --- | --- |
+| `RESEARCH_MODEL` | gpt-6-luna |
+| `RESEARCH_MAX_TOOL_CALLS` | 3（3） |
+| `RESEARCH_MAX_TURNS` | 4（4、LLM呼び出し回数） |
+| `RESEARCH_MAX_OUTPUT_TOKENS` | 2,000（2,000、1回のLLM応答） |
+| `RESEARCH_TOOL_TIMEOUT` | 90秒（90） |
+| `RESEARCH_TIMEOUT` | 180秒（180、調査全体） |
+
+並列ツール呼び出しは無効にし、通信前に回数を数えます。LLM通信の自動再試行はありません。
+取得側の既存ページ数・通信サイズ・期限・無料GET再試行制限も適用されます。
+1回のツール呼び出しが複数HTTP通信を伴うことがあります。モデルへ渡す候補はツールごとに
+記事10件・CVE10件まで、本文抜粋は各2,000文字までです。
+
+一部ソース失敗は取得済み結果と警告を返します。正常な0件は空配列で成功します。
+全ソース失敗やCVE照会失敗は即終了し、別ツールへの自動回復は行いません。
+上限到達は`research_tool_limit` / `research_turn_limit`、期限超過は`research_timeout`、
+未取得候補・重複は`research_invalid_candidate`、根拠のない要約は`research_unsupported_summary`。
+LLM通信失敗は`research_model_error`、不正な構造化出力は`research_invalid_output`です。
+取得なしの最終出力は`research_not_performed`。エラー時は標準出力に不完全な結果を出しません。
+CLI終了コードは既存と同じ成功0、実行失敗1、入力・設定エラー2です。
+
+標準エラーの`research_usage`イベントに、取得できたLLM入力・キャッシュ入力・出力・推論
+トークン数、LLM応答数、ツール回数、標準料金概算を記録します。推論は出力の内数です。
+概算はリクエストごとに計算して合算し、Function ToolにはWeb Search料金を加算しません。
+不明なモデル、使用量なし、失敗で使用量が不完全な場合は総費用を`null`とします。
+失敗時にも取得済みトークン数を残し、`usage_complete: false`で未計測分と区別します。
+これは請求額や厳密な費用上限ではありません。特別tier等の料金は対象外です。
+SDKトレース送信は無効です。外部応答全文や秘密情報をログ・ファイルへ保存しません。
+
+料金表は[OpenAI公式料金](https://developers.openai.com/api/docs/pricing)の
+2026-11-07確認値を使用しています。
+
+自動テストでは実Runnerと偽モデル、Responses API・ニュース・NVDのモックHTTPを組み合わせ、
+正常系、根拠照合、期間制限、部分失敗、上限・期限、使用量、既存CLIとの互換性を確認します。
+実モデルの検索語選択・関連性判断・ライブソースの網羅性はモックでは評価できません。
+今回、有料APIによる実通信確認は実施していません。

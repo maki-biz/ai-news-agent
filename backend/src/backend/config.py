@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-6-luna"
     search_max_tool_calls: int = Field(default=1, ge=1, le=3)
+    research_model: str = "gpt-6-luna"
+    research_max_tool_calls: int = Field(default=3, ge=1, le=3)
+    research_max_turns: int = Field(default=4, ge=1, le=4)
+    research_max_output_tokens: int = Field(default=2000, ge=256, le=2000)
+    research_tool_timeout: float = Field(default=90, gt=0, le=90)
+    research_timeout: float = Field(default=180, gt=0, le=180)
     nvd_api_key: SecretStr | None = None
     api_timeout_seconds: float = Field(default=60, gt=0, le=180)
     paid_search_enabled: bool = False

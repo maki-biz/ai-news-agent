@@ -36,6 +36,26 @@ def report_usage(model: str | None, usage: Usage | None, calls: int) -> None:
         usage: API使用量。欠落時はゼロとみなさない。
         calls: 応答内のWeb Search呼び出し数。
     """
+    estimate = estimate_cost(model, usage, calls)
+    logging.getLogger("backend.search_usage").info(
+        json.dumps(
+            {
+                "event": "search_usage",
+                "model": model,
+                "usage": usage.model_dump() if usage else None,
+                "web_search_calls": calls,
+                "estimated_standard_cost_usd": estimate,
+                "pricing_date": "2026-11-07",
+                "estimate_basis": "standard token rates + $0.01 per observed web_search_call; not billing total",
+            }
+        )
+    )
+
+
+def estimate_cost(
+    model: str | None, usage: Usage | None, calls: int = 0
+) -> float | None:
+    """既存標準料金で概算する。不明な使用量・モデルはNone。"""
     # 2026-11-07公式標準料金。長文・特別tier等は計算対象外。
     rates = {
         "gpt-6-luna": ("0.10", "0.01", "0.50"),
@@ -55,16 +75,4 @@ def report_usage(model: str | None, usage: Usage | None, calls: int) -> None:
                 / Decimal(1000000)
                 + calls * Decimal("0.01")
             )
-    logging.getLogger("backend.search_usage").info(
-        json.dumps(
-            {
-                "event": "search_usage",
-                "model": model,
-                "usage": usage.model_dump() if usage else None,
-                "web_search_calls": calls,
-                "estimated_standard_cost_usd": estimate,
-                "pricing_date": "2026-11-07",
-                "estimate_basis": "standard token rates + $0.01 per observed web_search_call; not billing total",
-            }
-        )
-    )
+    return estimate
