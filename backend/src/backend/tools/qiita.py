@@ -40,7 +40,7 @@ class QiitaNewsSource:
     async def search(self, request: SearchRequest) -> SourceResult:
         """検索期間は広めに照会し、正確な日付境界は共通サービスで判定する。"""
         result = SourceResult(articles=[], source_urls=[])
-        per_page = min(100, self.settings.source_max_candidates)
+        per_page = min(15, self.settings.source_max_candidates)
         # API側の日付解釈との差を吸収し、取得後に指定タイムゾーンで再検査する。
         start = (
             request.start_date - timedelta(days=1)
