@@ -1,9 +1,29 @@
 """検索ソース間で共有する入力・出力モデル。"""
 
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, HttpUrl, model_validator
+
+from backend.cve_schemas import CveDetails
+
+
+class Provenance(BaseModel):
+    """取得経路。元記事URLはArticle.urlとして別途保持する。"""
+
+    source_id: str
+    source_url: HttpUrl
+    retrieved_at: datetime
+
+
+class SourceStatus(BaseModel):
+    """空の正常応答と取得失敗を区別する実行状態。"""
+
+    source_id: str
+    status: Literal["ok", "partial", "failed"]
+    error: str | None = None
+    retry_after: str | None = None
 
 
 class SearchRequest(BaseModel):
@@ -13,12 +33,19 @@ class SearchRequest(BaseModel):
     start_date: date
     end_date: date
     limit: int = Field(default=5, ge=1, le=10)
+    cve_limit: int = Field(default=5, ge=1, le=100)
+    timezone: str = "UTC"
+    include_unknown_dates: bool = True
 
     @model_validator(mode="after")
     def validate_conditions(self) -> "SearchRequest":
         """通信前に空のクエリと逆転した期間を拒否する。"""
         if not self.query.strip() or self.start_date > self.end_date:
             raise ValueError("invalid search conditions")
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError:
+            raise ValueError("invalid timezone") from None
         return self
 
 
@@ -30,6 +57,10 @@ class Article(BaseModel):
     published_at: date | None
     source: str = ""
     verification_status: Literal["unverified"] = "unverified"
+    published_datetime: datetime | None = None
+    date_basis: Literal["published", "unknown"] = "unknown"
+    provenance: list[Provenance] = Field(default_factory=list)
+    excerpt: str = Field(default="", max_length=2000)
 
 
 class Candidates(BaseModel):
@@ -45,6 +76,9 @@ class SearchResult(BaseModel):
     articles: list[Article]
     source_urls: list[HttpUrl]
     warnings: list[str]
+    vulnerabilities: list[CveDetails] = Field(default_factory=list)
+    source_statuses: list[SourceStatus] = Field(default_factory=list)
+    retrievals: list[Provenance] = Field(default_factory=list)
 
 
 class SourceResult(BaseModel):
@@ -53,3 +87,6 @@ class SourceResult(BaseModel):
     articles: list[Article]
     source_urls: list[HttpUrl]
     warnings: list[str] = Field(default_factory=list)
+    vulnerabilities: list[CveDetails] = Field(default_factory=list)
+    source_statuses: list[SourceStatus] = Field(default_factory=list)
+    retrievals: list[Provenance] = Field(default_factory=list)

@@ -1,120 +1,19 @@
 """NVDのCVE情報を取得し、利用するフィールドを検証する。"""
 
+import asyncio
 import re
-from datetime import datetime
+from datetime import UTC, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, ValidationError
+from pydantic import BaseModel, Field, SecretStr, ValidationError
 
+from backend.config import Settings
+from backend.cve_schemas import CveDetails, NvdResponse, Vulnerability
+from backend.schemas import Provenance, SearchRequest, SourceResult, SourceStatus
 from backend.tools.http import ToolError, request_json
 
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-
-
-class Description(BaseModel):
-    """言語タグ付きの脆弱性説明。"""
-
-    lang: str
-    value: str
-
-
-class Reference(BaseModel):
-    """NVDが示す参照先と分類タグ。"""
-
-    url: HttpUrl
-    source: str | None = None
-    tags: list[str] = Field(default_factory=list)
-
-
-class CvssData(BaseModel):
-    """CVSSのバージョン・ベクトル・基本スコア。"""
-
-    version: str
-    vectorString: str
-    baseScore: float = Field(ge=0, le=10)
-    baseSeverity: str | None = None
-
-
-class Metric(BaseModel):
-    """評価主体とCVSS評価の組。"""
-
-    source: str
-    type: str
-    cvssData: CvssData
-    baseSeverity: str | None = None
-
-
-class Metrics(BaseModel):
-    """CVSSの型検証と追加指標の保持。
-
-    CVSS以外はmodel_extraに未検証のまま保持する。追加指標を判断に
-    使用する際は専用のモデルで検証すること。JSON互換性のため同階層に出力する。
-    """
-
-    # 追加指標は未検証の拡張データとして保持し、CVSSの検証済み項目と区別する。
-    model_config = ConfigDict(extra="allow")
-    cvssMetricV2: list[Metric] = Field(default_factory=list)
-    cvssMetricV30: list[Metric] = Field(default_factory=list)
-    cvssMetricV31: list[Metric] = Field(default_factory=list)
-    cvssMetricV40: list[Metric] = Field(default_factory=list)
-
-
-class CpeMatch(BaseModel):
-    """影響製品を表すCPEとバージョン境界。"""
-
-    vulnerable: bool
-    criteria: str
-    versionStartIncluding: str | None = None
-    versionStartExcluding: str | None = None
-    versionEndIncluding: str | None = None
-    versionEndExcluding: str | None = None
-
-
-class Node(BaseModel):
-    """製品条件の論理結合。"""
-
-    operator: str
-    negate: bool = False
-    cpeMatch: list[CpeMatch] = Field(default_factory=list)
-
-
-class Configuration(BaseModel):
-    """影響条件のグループ。"""
-
-    operator: str | None = None
-    negate: bool = False
-    nodes: list[Node]
-
-
-class CveDetails(BaseModel):
-    """NVDの脆弱性情報。修正版を境界値から推測しない。"""
-
-    id: str
-    sourceIdentifier: str
-    published: datetime
-    lastModified: datetime
-    vulnStatus: str
-    descriptions: list[Description]
-    references: list[Reference]
-    metrics: Metrics = Field(default_factory=Metrics)
-    configurations: list[Configuration] = Field(default_factory=list)
-    cisaExploitAdd: str | None = None
-    cisaActionDue: str | None = None
-    cisaRequiredAction: str | None = None
-    cisaVulnerabilityName: str | None = None
-
-
-class Vulnerability(BaseModel):
-    """NVDの脆弱性エントリー。"""
-
-    cve: CveDetails
-
-
-class NvdResponse(BaseModel):
-    """CVE照会レスポンスの件数とエントリー。"""
-
-    totalResults: int = Field(ge=0)
-    vulnerabilities: list[Vulnerability]
 
 
 async def get_cve_details(
@@ -148,3 +47,167 @@ async def get_cve_details(
     if cve.id != cve_id:
         raise ToolError("invalid_response")
     return cve
+
+
+class NvdSearchResponse(BaseModel):
+    """検索ページの構造を検証し、CVEごとの不正は分離する。"""
+
+    totalResults: int = Field(ge=0)
+    startIndex: int = Field(ge=0)
+    resultsPerPage: int = Field(ge=0, le=2000)
+    vulnerabilities: list[object]
+
+
+class NvdNewsSource:
+    """公開期間でCVEを取得する。記事モデルへ変換しない。"""
+
+    def __init__(self, client: httpx.AsyncClient, settings: "Settings") -> None:
+        """既存の単件照会と同じ接続設定を使用する。"""
+        self.client, self.settings = client, settings
+
+    async def search(self, request: "SearchRequest") -> "SourceResult":
+        """120日未満の区間とページを上限制御しながら取得する。"""
+        result = SourceResult(articles=[], source_urls=[])
+        zone = ZoneInfo(request.timezone)
+        try:
+            start = datetime.combine(request.start_date, time.min, zone).astimezone(UTC)
+            end = datetime.combine(request.end_date, time.max, zone).astimezone(UTC)
+        except OverflowError:
+            raise ToolError("unsupported_date_range") from None
+        calls, partial, complete = 0, False, False
+        error, retry_after = None, None
+        headers = (
+            {"apiKey": self.settings.nvd_api_key.get_secret_value()}
+            if self.settings.nvd_api_key
+            else {}
+        )
+        try:
+            async with asyncio.timeout(self.settings.source_deadline_seconds * 0.95):
+                while start <= end:
+                    span = min(
+                        end - start, timedelta(days=120) - timedelta(milliseconds=1)
+                    )
+                    stop = start + span
+                    index = 0
+                    while True:
+                        if calls >= self.settings.source_max_pages:
+                            raise ToolError("page_limit_reached")
+                        if calls:
+                            await asyncio.sleep(0.7 if headers else 6.1)
+                        calls += 1
+                        payload = await request_json(
+                            self.client,
+                            "GET",
+                            NVD_URL,
+                            params={
+                                "pubStartDate": start.isoformat(
+                                    timespec="milliseconds"
+                                ),
+                                "pubEndDate": stop.isoformat(timespec="milliseconds"),
+                                "keywordSearch": request.query,
+                                "startIndex": index,
+                                "resultsPerPage": min(
+                                    2000, self.settings.source_max_candidates
+                                ),
+                            },
+                            headers=headers,
+                            timeout=self.settings.api_timeout_seconds,
+                            max_bytes=self.settings.max_response_bytes,
+                        )
+                        try:
+                            page = NvdSearchResponse.model_validate(payload)
+                            if (
+                                page.startIndex != index
+                                or len(page.vulnerabilities) > page.resultsPerPage
+                                or (
+                                    page.vulnerabilities
+                                    and page.totalResults
+                                    < index + len(page.vulnerabilities)
+                                )
+                            ):
+                                raise ValueError
+                        except (ValidationError, ValueError):
+                            raise ToolError("invalid_response") from None
+                        source_url = str(
+                            httpx.URL(
+                                NVD_URL,
+                                params={
+                                    "pubStartDate": start.isoformat(
+                                        timespec="milliseconds"
+                                    ),
+                                    "pubEndDate": stop.isoformat(
+                                        timespec="milliseconds"
+                                    ),
+                                    "keywordSearch": request.query,
+                                    "startIndex": index,
+                                    "resultsPerPage": min(
+                                        2000, self.settings.source_max_candidates
+                                    ),
+                                },
+                            )
+                        )
+                        result.source_urls.append(source_url)
+                        result.retrievals.append(
+                            Provenance(
+                                source_id="nvd",
+                                source_url=source_url,
+                                retrieved_at=datetime.now(UTC),
+                            )
+                        )
+                        for entry in page.vulnerabilities:
+                            try:
+                                cve = Vulnerability.model_validate(entry).cve
+                                if not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve.id):
+                                    raise ValueError
+                                result.vulnerabilities.append(cve)
+                                result.source_urls.append(
+                                    f"https://nvd.nist.gov/vuln/detail/{cve.id}"
+                                )
+                            except (ValidationError, ValueError):
+                                partial = True
+                                result.warnings.append("nvd: invalid_item")
+                        index += len(page.vulnerabilities)
+                        if index >= page.totalResults:
+                            break
+                        if not page.vulnerabilities:
+                            raise ToolError("invalid_pagination")
+                        if (
+                            len(result.vulnerabilities)
+                            >= self.settings.source_max_candidates
+                        ):
+                            raise ToolError("candidate_limit_reached")
+                    if stop >= end:
+                        break
+                    start = stop + timedelta(milliseconds=1)
+                    if (
+                        start <= end
+                        and len(result.vulnerabilities)
+                        >= self.settings.source_max_candidates
+                    ):
+                        raise ToolError("candidate_limit_reached")
+                complete = True
+        except (ToolError, TimeoutError) as exc:
+            if not result.source_urls:
+                if isinstance(exc, ToolError):
+                    raise
+                raise ToolError("deadline_exceeded") from None
+            partial = True
+            code = exc.code if isinstance(exc, ToolError) else "deadline_exceeded"
+            error = code
+            retry_after = exc.retry_after if isinstance(exc, ToolError) else None
+            result.warnings.append(f"nvd: {code}")
+        if not complete:
+            result.warnings.append("nvd: incomplete_collection")
+        result.vulnerabilities = result.vulnerabilities[
+            : self.settings.source_max_candidates
+        ]
+        result.source_urls = list(dict.fromkeys(result.source_urls))
+        result.source_statuses.append(
+            SourceStatus(
+                source_id="nvd",
+                status="partial" if partial else "ok",
+                error=error,
+                retry_after=retry_after,
+            )
+        )
+        return result

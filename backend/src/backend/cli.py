@@ -27,8 +27,6 @@ async def run(args: argparse.Namespace) -> SearchResult | CveDetails:
                 timeout=settings.api_timeout_seconds,
                 api_key=settings.nvd_api_key,
             )
-        if not settings.openai_api_key or not len(settings.openai_api_key):
-            raise ToolError("missing_openai_api_key")
         return await search_news(
             args.query,
             args.start,
@@ -39,6 +37,8 @@ async def run(args: argparse.Namespace) -> SearchResult | CveDetails:
             limit=args.limit,
             max_tool_calls=settings.search_max_tool_calls,
             timeout=settings.api_timeout_seconds,
+            settings=settings,
+            sources=getattr(args, "sources", None),
         )
 
 
@@ -53,6 +53,11 @@ def main() -> int:
     search.add_argument("--start", type=date.fromisoformat, required=True)
     search.add_argument("--end", type=date.fromisoformat, required=True)
     search.add_argument("--limit", type=int, default=5)
+    search.add_argument(
+        "--sources",
+        nargs="+",
+        choices=["rss", "hatena", "zenn", "qiita", "nvd", "openai"],
+    )
     args = parser.parse_args()
     # 使用量のみ標準エラーへ出し、結果JSONと通信ログを混ぜない。
     usage_logger = logging.getLogger("backend.search_usage")

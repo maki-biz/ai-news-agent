@@ -51,6 +51,19 @@ AI技術・サイバーセキュリティのニュースを調査し、一次情
 | 品質 | 代表的な20ケースの評価データを作成 |
 | コスト | 調査単位で使用量と概算コストを把握する |
 
+## 取得基盤の更新（2026-11-07）
+
+通常収集は無料のRSS/Atom、はてなブックマーク、Zenn、Qiita、NVDへ変更。
+取得・期間判定・URL正規化・重複排除・障害分離はPythonコードで行う。
+記事とCVEは別モデル・別結果配列とし、元URLと取得経路を保持する。
+OpenAI APIは後続の関連性判定・要約・分類・重要度評価・Tool Callingで引き続き使用する。
+Web Searchは既定無効で、明示許可と追加調査での選択が揃った場合のみ利用する。
+無料ソース失敗からの自動有料フォールバックは行わない。
+
+現在の実装パッケージは`backend/src/backend/`。以下の全体構成・DB・調査エージェントは
+将来設計を含む。取得CLIの最新仕様・設定・制約は`backend/README.md`を参照。
+RSSの過去期間網羅やライブ結果の完全再現は保証せず、上限・日付不明・部分失敗を明示する。
+
 ## 3. 技術スタック
 
 | レイヤー | 採用技術 | 目的 |
@@ -58,7 +71,8 @@ AI技術・サイバーセキュリティのニュースを調査し、一次情
 | 言語 | Python >=3.13.17,<3.14（開発環境は3.13.17） | エージェント・API実装 |
 | LLM | OpenAI API | 調査判断・要約・分類 |
 | エージェント | OpenAI Agents SDK | Tool Calling・実行制御 |
-| 検索 | OpenAI Web Search | 最新ニュースの調査 |
+| 取得 | 公式RSS/Atom・はてな・Zenn・Qiita・NVD | 無料ソースを既定とするニュース・CVE収集 |
+| 任意の追加検索 | OpenAI Web Search（既定無効） | 明示許可された追加調査のみ |
 | セキュリティ情報 | NVD API / CISA KEV | CVE・悪用情報の照合 |
 | API | FastAPI + Pydantic | REST API・入力検証 |
 | DB | SQLite + SQLAlchemy | 記事・実行履歴の永続化 |
@@ -75,7 +89,10 @@ flowchart TD
     UI[React + TypeScript] --> API[FastAPI]
     API --> SERVICE[Research Service]
     SERVICE --> AGENT[OpenAI Agents SDK]
-    AGENT --> SEARCH[Web Search]
+    SERVICE --> COLLECT[無料RSS / Qiita / NVD取得]
+    COLLECT --> VALIDATE
+    VALIDATE --> AGENT
+    AGENT --> SEARCH[許可時のみWeb Search追加調査]
     AGENT --> ARTICLE[記事取得・解析]
     AGENT --> CVE[NVD / CISA]
     SERVICE --> VALIDATE[スキーマ・出典・URL検証]

@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13.17,<3.14"
 dependencies = [
     "fastapi>=0.162.0",
+    "feedparser>=6.0.14",
     "httpx>=0.28.1",
     "openai-agents>=0.24.0",
     "pydantic-settings>=2.16.2",

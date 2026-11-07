@@ -5,6 +5,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from backend.config import Settings
 from backend.tools.cve import get_cve_details
 from backend.tools.http import ToolError
 from backend.tools.search import search_news
@@ -121,6 +122,8 @@ async def search(payload):
             client=client,
             api_key=SecretStr("test"),
             model="test",
+            settings=Settings(_env_file=None, paid_search_enabled=True),
+            sources=["openai"],
         )
 
 
