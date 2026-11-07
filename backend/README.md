@@ -2,7 +2,7 @@
 
 ## 環境構築
 
-Python 3.13以上とuvを使用します。以下は`backend/`で実行してください。
+対応Pythonは`>=3.13.17,<3.14`です。開発環境は`.python-version`で3.13.17を指定し、uvを使用します。以下は`backend/`で実行してください。
 
 ```bash
 uv sync --locked
